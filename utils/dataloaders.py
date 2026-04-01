@@ -112,7 +112,8 @@ def create_dataloader(path,
                       quad=False,
                       min_items=0,
                       prefix='',
-                      shuffle=False):
+                      shuffle=False,
+                      allow_empty=False):
     if rect and shuffle:
         LOGGER.warning('WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False')
         shuffle = False
@@ -130,7 +131,8 @@ def create_dataloader(path,
             pad=pad,
             image_weights=image_weights,
             min_items=min_items,
-            prefix=prefix)
+            prefix=prefix,
+            allow_empty=allow_empty)
 
     batch_size = min(batch_size, len(dataset))
     nd = torch.cuda.device_count()  # number of CUDA devices
@@ -445,7 +447,8 @@ class LoadImagesAndLabels(Dataset):
                  stride=32,
                  pad=0.0,
                  min_items=0,
-                 prefix=''):
+                 prefix='',
+                 allow_empty=False):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -456,6 +459,7 @@ class LoadImagesAndLabels(Dataset):
         self.stride = stride
         self.path = path
         self.albumentations = Albumentations(size=img_size) if augment else None
+        self.allow_empty = allow_empty
 
         try:
             f = []  # image files
@@ -495,13 +499,18 @@ class LoadImagesAndLabels(Dataset):
             tqdm(None, desc=prefix + d, total=n, initial=n, bar_format=TQDM_BAR_FORMAT)  # display cache results
             if cache['msgs']:
                 LOGGER.info('\n'.join(cache['msgs']))  # display warnings
-        assert nf > 0 or not augment, f'{prefix}No labels found in {cache_path}, can not start training. {HELP_URL}'
+        assert nf > 0 or not augment or self.allow_empty, f'{prefix}No labels found in {cache_path}, can not start training. {HELP_URL}'
 
         # Read cache
         [cache.pop(k) for k in ('hash', 'version', 'msgs')]  # remove items
         labels, shapes, self.segments = zip(*cache.values())
-        nl = len(np.concatenate(labels, 0))  # number of labels
-        assert nl > 0 or not augment, f'{prefix}All labels empty in {cache_path}, can not start training. {HELP_URL}'
+        nl = 0
+        if labels:
+            try:
+                nl = len(np.concatenate(labels, 0))  # number of labels
+            except ValueError:  # in case labels is empty or has inconsistent shapes
+                nl = 0
+        assert nl > 0 or not augment or self.allow_empty, f'{prefix}All labels empty in {cache_path}, can not start training. {HELP_URL}'
         self.labels = list(labels)
         self.shapes = np.array(shapes)
         self.im_files = list(cache.keys())  # update
@@ -529,12 +538,12 @@ class LoadImagesAndLabels(Dataset):
         include_class = []  # filter labels to include only these classes (optional)
         include_class_array = np.array(include_class).reshape(1, -1)
         for i, (label, segment) in enumerate(zip(self.labels, self.segments)):
-            if include_class:
+            if include_class and len(label):
                 j = (label[:, 0:1] == include_class_array).any(1)
                 self.labels[i] = label[j]
                 if segment:
                     self.segments[i] = segment[j]
-            if single_cls:  # single-class training, merge all classes into 0
+            if single_cls and len(label):  # single-class training, merge all classes into 0
                 self.labels[i][:, 0] = 0
 
         # Rectangular Training

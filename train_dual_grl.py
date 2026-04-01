@@ -228,7 +228,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                           quad=opt.quad,
                                                           prefix=colorstr('train target: '),
                                                           shuffle=True,
-                                                          min_items=opt.min_items)
+                                                          min_items=opt.min_items,
+                                                          allow_empty=True)
     else:
         target_loader = train_loader
 
