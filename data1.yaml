@@ -1,0 +1,13 @@
+train: D:\Mixfog_DEIMv2\mean_teacher_student_yolo\val\images
+val: D:\Mixfog_DEIMv2\mean_teacher_student_yolo\val\images
+target_train: D:\Mixfog_DEIMv2\mean_teacher_student_yolo\val\images
+nc: 8
+names:
+  0 : person
+  1 : rider
+  2 : car
+  3 : train
+  4 : bicycle
+  5 : motorcycle
+  6 : truck
+  7 : bus
