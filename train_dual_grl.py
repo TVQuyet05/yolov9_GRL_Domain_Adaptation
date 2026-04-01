@@ -294,6 +294,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             self.hook = model.model[layer].register_forward_hook(self.hook_fn)
         def hook_fn(self, module, input, output):
             self.feature = output
+        def remove(self):
+            self.hook.remove()
 
     target_iter = iter(target_loader)
     backbone_layer = opt.grl_layer
@@ -327,11 +329,11 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(3, device=device)  # mean losses
+        mloss = torch.zeros(5, device=device)  # mean losses (box, cls, dfl, loss_det, loss_domain)
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
-        LOGGER.info(('\n' + '%11s' * 7) % ('Epoch', 'GPU_mem', 'box_loss', 'cls_loss', 'dfl_loss', 'Instances', 'Size'))
+        LOGGER.info(('\n' + '%11s' * 9) % ('Epoch', 'GPU_mem', 'box', 'cls', 'dfl', 'det', 'domain', 'Instances', 'Size'))
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
@@ -392,7 +394,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 label_t = torch.zeros_like(d_out_t, device=device)
                 loss_domain = bce_loss_fn(d_out_s, label_s) + bce_loss_fn(d_out_t, label_t)
                 
+                loss_domain *= 10.0
+
                 loss_total = loss + loss_domain
+                
+                # Cập nhật loss items để log (kết hợp detection loss và domain loss)
+                loss_items_all = torch.cat((loss_items, loss.unsqueeze(0), loss_domain.unsqueeze(0)))
 
                 if RANK != -1:
                     loss_total *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -418,9 +425,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
             # Log
             if RANK in {-1, 0}:
-                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mloss = (mloss * i + loss_items_all) / (i + 1)  # update mean losses
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
-                pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
+                pbar.set_description(('%11s' * 2 + '%11.4g' * 7) %
                                      (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
                 callbacks.run('on_train_batch_end', model, ni, imgs, targets, paths, list(mloss))
                 if callbacks.stop_training:
@@ -454,11 +461,17 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             stop = stopper(epoch=epoch, fitness=fi)  # early stop check
             if fi > best_fitness:
                 best_fitness = fi
-            log_vals = list(mloss) + list(results) + lr
+            
+            # Chỉ log 3 loss đầu (box, cls, dfl) để khớp với định dạng mặc định của loggers
+            log_vals = list(mloss[:3]) + list(results) + lr 
             callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
 
             # Save model
             if (not nosave) or (final_epoch and not evolve):  # if save
+                # Gỡ hook để tránh lỗi deepcopy
+                if extractor:
+                    extractor.remove()
+
                 ckpt = {
                     'epoch': epoch,
                     'best_fitness': best_fitness,
@@ -474,6 +487,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 torch.save(ckpt, last)
                 if best_fitness == fi:
                     torch.save(ckpt, best)
+                
+                # Đăng ký lại hook sau khi lưu xong để tiếp tục train epoch sau
+                extractor = FeatureExtractor(de_parallel(model), backbone_layer)
+
                 if opt.save_period > 0 and epoch % opt.save_period == 0:
                     torch.save(ckpt, w / f'epoch{epoch}.pt')
                 del ckpt
