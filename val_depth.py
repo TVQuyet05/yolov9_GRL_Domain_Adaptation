@@ -137,7 +137,6 @@ def run(
     # Configure
     model.eval()
     cuda = device.type != 'cpu'
-    #is_coco = isinstance(data.get('val'), str) and data['val'].endswith(f'coco{os.sep}val2017.txt')  # COCO dataset
     is_coco = isinstance(data.get('val'), str) and data['val'].endswith(f'val2017.txt')  # COCO dataset
     nc = 1 if single_cls else int(data['nc'])  # number of classes
     iouv = torch.linspace(0.5, 0.95, 10, device=device)  # iou vector for mAP@0.5:0.95
@@ -156,7 +155,7 @@ def run(
         pad, rect = (0.0, False) if task == 'speed' else (0.5, pt)  # square inference for benchmarks
         task = task if task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
         
-        # Use depth dataloader if val_depth path exists
+        # Use depth dataloader
         if val_depth_path:
             dataloader = create_dataloader_depth(data[task],
                                            depth_path=val_depth_path,
@@ -219,23 +218,26 @@ def run(
 
         # Inference
         with dt[1]:
-            if compute_loss:
-                # Training mode: model has depth_map parameter
-                if depths is not None and hasattr(model, 'depth_attention'):
-                    preds, train_out = model(im, depth_map=depths)
-                else:
-                    preds, train_out = model(im)
+            # DualDDetect output format:
+            #   training mode: [d1, d2] (list of two lists of tensors)
+            #   eval mode:     (y, [d1, d2]) where y = [y_head1, y_head2] (tuple)
+            has_depth_attention = hasattr(model, 'depth_attention') or (hasattr(model, 'model') and hasattr(model.model, 'depth_attention'))
+            if depths is not None and has_depth_attention:
+                preds, train_out = model(im, depth_map=depths) if compute_loss else (model(im, depth_map=depths), None)
             else:
-                if depths is not None and hasattr(model, 'depth_attention'):
-                    preds = model(im, depth_map=depths, augment=augment)
-                    train_out = None
-                else:
-                    preds = model(im, augment=augment)
-                    train_out = None
+                preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
 
-        # Loss
+        # Handle DualDDetect output — use second head (auxiliary head)
+        # Same logic as val_dual.py
         if compute_loss:
-            loss += compute_loss(train_out, targets)[1]  # box, obj, cls
+            # preds is [d1, d2] in training mode — take second head for NMS preds
+            preds = preds[1]
+            # Loss is computed by compute_loss on the full train_out
+            # (commented out as in val_dual.py to avoid issues)
+            # loss += compute_loss(train_out, targets)[1]
+        else:
+            # preds is (y, [d1, d2]) in eval mode — take y[1] (second head)
+            preds = preds[0][1]
 
         # NMS
         targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)  # to pixels
@@ -395,10 +397,8 @@ def parse_opt():
 
 
 def main(opt):
-    #check_requirements(exclude=('tensorboard', 'thop'))
-
     if opt.task in ('train', 'val', 'test'):  # run normally
-        if opt.conf_thres > 0.001:  # https://github.com/ultralytics/yolov5/issues/1466
+        if opt.conf_thres > 0.001:
             LOGGER.info(f'WARNING ⚠️ confidence threshold {opt.conf_thres} > 0.001 produces invalid results')
         if opt.save_hybrid:
             LOGGER.info('WARNING ⚠️ --save-hybrid will return high mAP from hybrid labels, not from predictions alone')
@@ -408,13 +408,11 @@ def main(opt):
         weights = opt.weights if isinstance(opt.weights, list) else [opt.weights]
         opt.half = torch.cuda.is_available() and opt.device != 'cpu'  # FP16 for fastest results
         if opt.task == 'speed':  # speed benchmarks
-            # python val_depth.py --task speed --data data_depth.yaml --batch 1 --weights yolo.pt...
             opt.conf_thres, opt.iou_thres, opt.save_json = 0.25, 0.45, False
             for opt.weights in weights:
                 run(**vars(opt), plots=False)
 
         elif opt.task == 'study':  # speed vs mAP benchmarks
-            # python val_depth.py --task study --data data_depth.yaml --iou 0.7 --weights yolo.pt...
             for opt.weights in weights:
                 f = f'study_{Path(opt.data).stem}_{Path(opt.weights).stem}.txt'  # filename to save to
                 x, y = list(range(256, 1536 + 128, 128)), []  # x axis (image sizes), y axis
