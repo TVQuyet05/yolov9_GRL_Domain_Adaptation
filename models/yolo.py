@@ -678,6 +678,46 @@ class DetectionModel(BaseModel):
 Model = DetectionModel  # retain YOLO 'Model' class for backwards compatibility
 
 
+class DetectionModelDepth(DetectionModel):
+    """YOLO detection model with depth map attention injection."""
+    
+    depth_inject_idx = 3  # Inject after backbone layer 3 (AConv P3/8)
+    
+    def __init__(self, cfg='yolo.yaml', ch=3, nc=None, anchors=None):
+        super().__init__(cfg, ch, nc, anchors)
+        # Create depth attention module
+        # Get channel count of the layer after which we inject
+        # Layer 3 output goes into layer 4, so we need layer 3's output channels
+        # We parse this from the saved channel list during model construction
+        self.depth_attention = DepthAttention(out_channels=1)
+        LOGGER.info(f'DepthAttention module added after backbone layer {self.depth_inject_idx}')
+    
+    def forward(self, x, depth_map=None, augment=False, profile=False, visualize=False):
+        if depth_map is None or augment:
+            # Fallback to standard forward (no depth)
+            if augment:
+                return self._forward_augment(x)
+            return self._forward_once(x, profile, visualize)
+        return self._forward_with_depth(x, depth_map, profile, visualize)
+    
+    def _forward_with_depth(self, x, depth_map, profile=False, visualize=False):
+        """Forward pass with depth attention injection after layer 3."""
+        y, dt = [], []
+        for m in self.model:
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            if profile:
+                self._profile_one_layer(m, x, dt)
+            x = m(x)
+            # Inject depth attention after the target layer
+            if m.i == self.depth_inject_idx:
+                x = self.depth_attention(depth_map, x)
+            y.append(x if m.i in self.save else None)
+            if visualize:
+                feature_visualization(x, m.type, m.i, save_dir=visualize)
+        return x
+
+
 class SegmentationModel(DetectionModel):
     # YOLO segmentation model
     def __init__(self, cfg='yolo-seg.yaml', ch=3, nc=None, anchors=None):

@@ -1231,3 +1231,37 @@ class Classify(nn.Module):
         if isinstance(x, list):
             x = torch.cat(x, 1)
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+
+
+class DepthAttention(nn.Module):
+    """Depth-based spatial attention module.
+    
+    Processes a single-channel depth map through conv blocks + sigmoid
+    to create an attention mask that emphasizes high-depth (far) regions.
+    The attention is multiplied element-wise with a backbone feature map.
+    """
+    def __init__(self, out_channels):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 32, 3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, 1, bias=False),
+            nn.BatchNorm2d(1),
+        )
+    
+    def forward(self, depth_map, feature):
+        """
+        Args:
+            depth_map: (B, 1, H_orig, W_orig) normalized depth tensor
+            feature: (B, C, H_feat, W_feat) backbone feature at target layer
+        Returns:
+            feature * attention (element-wise, broadcast over channels)
+        """
+        attn = F.interpolate(depth_map, size=feature.shape[2:], mode='bilinear', align_corners=False)
+        attn = self.conv(attn)
+        attn = torch.sigmoid(attn)
+        return feature * attn

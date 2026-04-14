@@ -921,6 +921,123 @@ class LoadImagesAndLabels(Dataset):
         return torch.stack(im4, 0), torch.cat(label4, 0), path4, shapes4
 
 
+class LoadImagesAndLabelsDepth(LoadImagesAndLabels):
+    """Dataset that loads images, labels, and corresponding depth maps."""
+    
+    def __init__(self, path, depth_path, img_size=640, batch_size=16, **kwargs):
+        super().__init__(path, img_size, batch_size, **kwargs)
+        self.depth_path = depth_path
+    
+    def _get_depth_file(self, im_file):
+        """Get depth map path from image path.
+        e.g. aachen_000003_000019_leftImg8bit.png -> aachen_000003_000019_leftImg8bitnpy.npy
+        """
+        stem = Path(im_file).stem  # e.g. aachen_000003_000019_leftImg8bit
+        depth_name = stem + 'npy.npy'
+        return os.path.join(self.depth_path, depth_name)
+    
+    def __getitem__(self, index):
+        # Get standard items from parent
+        img, labels_out, im_file, shapes = super().__getitem__(index)
+        
+        # Load depth map
+        depth_file = self._get_depth_file(im_file)
+        if os.path.exists(depth_file):
+            depth = np.load(depth_file)  # (H, W) or (H, W, 1)
+        else:
+            # Fallback: zeros if depth not found
+            h, w = img.shape[1], img.shape[2]  # CHW format
+            depth = np.zeros((h, w), dtype=np.float32)
+        
+        # Ensure 2D
+        if depth.ndim == 3:
+            depth = depth[:, :, 0] if depth.shape[2] == 1 else depth.mean(axis=2)
+        
+        # Resize depth to match img spatial dims (img is CHW after parent __getitem__)
+        h_img, w_img = img.shape[1], img.shape[2]
+        if depth.shape[0] != h_img or depth.shape[1] != w_img:
+            depth = cv2.resize(depth.astype(np.float32), (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+        
+        # Normalize to [0, 1]
+        depth = depth.astype(np.float32)
+        d_min, d_max = depth.min(), depth.max()
+        if d_max > d_min:
+            depth = (depth - d_min) / (d_max - d_min)
+        else:
+            depth = np.zeros_like(depth)
+        
+        # Convert to tensor (1, H, W)
+        depth_tensor = torch.from_numpy(depth).unsqueeze(0)
+        
+        return img, labels_out, im_file, shapes, depth_tensor
+    
+    @staticmethod
+    def collate_fn_depth(batch):
+        im, label, path, shapes, depth = zip(*batch)
+        for i, lb in enumerate(label):
+            lb[:, 0] = i
+        return torch.stack(im, 0), torch.cat(label, 0), path, shapes, torch.stack(depth, 0)
+
+
+def create_dataloader_depth(path,
+                            depth_path,
+                            imgsz,
+                            batch_size,
+                            stride,
+                            single_cls=False,
+                            hyp=None,
+                            augment=False,
+                            cache=False,
+                            pad=0.0,
+                            rect=False,
+                            rank=-1,
+                            workers=8,
+                            image_weights=False,
+                            close_mosaic=False,
+                            quad=False,
+                            min_items=0,
+                            prefix='',
+                            shuffle=False,
+                            allow_empty=False):
+    if rect and shuffle:
+        LOGGER.warning('WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False')
+        shuffle = False
+    with torch_distributed_zero_first(rank):
+        dataset = LoadImagesAndLabelsDepth(
+            path,
+            depth_path=depth_path,
+            img_size=imgsz,
+            batch_size=batch_size,
+            augment=augment,
+            hyp=hyp,
+            rect=rect,
+            cache_images=cache,
+            single_cls=single_cls,
+            stride=int(stride),
+            pad=pad,
+            image_weights=image_weights,
+            min_items=min_items,
+            prefix=prefix,
+            allow_empty=allow_empty)
+
+    batch_size = min(batch_size, len(dataset))
+    nd = torch.cuda.device_count()
+    nw = min([os.cpu_count() // max(nd, 1), batch_size if batch_size > 1 else 0, workers])
+    sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
+    loader = DataLoader if image_weights or close_mosaic else InfiniteDataLoader
+    generator = torch.Generator()
+    generator.manual_seed(6148914691236517205 + RANK)
+    return loader(dataset,
+                  batch_size=batch_size,
+                  shuffle=shuffle and sampler is None,
+                  num_workers=nw,
+                  sampler=sampler,
+                  pin_memory=PIN_MEMORY,
+                  collate_fn=LoadImagesAndLabelsDepth.collate_fn_depth,
+                  worker_init_fn=seed_worker,
+                  generator=generator), dataset
+
+
 # Ancillary functions --------------------------------------------------------------------------------------------------
 def flatten_recursive(path=DATASETS_DIR / 'coco128'):
     # Flatten a recursive directory by bringing all files to top level
