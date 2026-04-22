@@ -1252,8 +1252,8 @@ class DepthAttention(nn.Module):
             nn.Conv2d(16, 32, 3, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 1, 1, bias=False),
-            nn.BatchNorm2d(1),
+            nn.Conv2d(32, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
         )
     
     def forward(self, depth_map, feature):

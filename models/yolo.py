@@ -685,12 +685,21 @@ class DetectionModelDepth(DetectionModel):
     
     def __init__(self, cfg='yolo.yaml', ch=3, nc=None, anchors=None):
         super().__init__(cfg, ch, nc, anchors)
-        # Create depth attention module
-        # Get channel count of the layer after which we inject
-        # Layer 3 output goes into layer 4, so we need layer 3's output channels
-        # We parse this from the saved channel list during model construction
-        self.depth_attention = DepthAttention(out_channels=1)
-        LOGGER.info(f'DepthAttention module added after backbone layer {self.depth_inject_idx}')
+        # Determine the number of output channels at self.depth_inject_idx
+        with torch.no_grad():
+            dummy_x = torch.zeros(1, ch, 64, 64)
+            y, dt = [], []
+            for m in self.model:
+                if m.f != -1:
+                    dummy_x = y[m.f] if isinstance(m.f, int) else [dummy_x if j == -1 else y[j] for j in m.f]
+                dummy_x = m(dummy_x)
+                y.append(dummy_x if m.i in self.save else None)
+                if m.i == self.depth_inject_idx:
+                    out_channels = dummy_x.shape[1]
+                    break
+                    
+        self.depth_attention = DepthAttention(out_channels=out_channels)
+        LOGGER.info(f'DepthAttention module added after backbone layer {self.depth_inject_idx} with {out_channels} channels')
     
     def forward(self, x, depth_map=None, augment=False, profile=False, visualize=False):
         if depth_map is None or augment:
