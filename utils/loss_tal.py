@@ -72,7 +72,7 @@ class BboxLoss(nn.Module):
         target_bboxes_pos = torch.masked_select(target_bboxes, bbox_mask).view(-1, 4)
         bbox_weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)
         
-        iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
+        iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, WIoU=True)
         loss_iou = 1.0 - iou
 
         loss_iou *= bbox_weight

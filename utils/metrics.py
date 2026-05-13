@@ -251,7 +251,7 @@ class WIoU_Scale:
         return 1
 
 
-def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, MDPIoU=False, feat_h=640, feat_w=640, eps=1e-7):
+def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, MDPIoU=False, WIoU=False, feat_h=640, feat_w=640, eps=1e-7):
     # Returns Intersection over Union (IoU) of box1(1,4) to box2(n,4)
 
     # Get the coordinates of bounding boxes
@@ -275,12 +275,32 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, MDPIoU=F
 
     # IoU
     iou = inter / union
-    if CIoU or DIoU or GIoU:
+    if CIoU or DIoU or GIoU or WIoU:
         cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex (smallest enclosing box) width
         ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
-        if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+        if CIoU or DIoU or WIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
             c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
             rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
+            
+            if WIoU:
+                # WIoU v3
+                exp_term = torch.exp(rho2 / c2.detach())
+                
+                # Outlier Degree (beta)
+                l_iou = 1.0 - iou
+                l_iou_detach = l_iou.detach()
+                beta = l_iou_detach / (l_iou_detach.mean() + eps)
+                
+                # Dynamic Non-monotonic Focusing Factor
+                alpha = 1.9
+                delta = 3.0
+                r = beta / (delta * (alpha ** (beta - delta)))
+                
+                # WIoU loss is r * exp_term * L_IoU
+                # To make it compatible with loss_iou = 1.0 - result, we return 1.0 - wiou_loss
+                wiou_loss = r.detach() * exp_term * l_iou
+                return 1.0 - wiou_loss
+                
             if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
                 v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
                 with torch.no_grad():
