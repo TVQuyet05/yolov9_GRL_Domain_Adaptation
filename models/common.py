@@ -1268,3 +1268,60 @@ class DepthAttention(nn.Module):
         attn = self.conv(attn)
         attn = torch.sigmoid(attn)
         return feature * attn
+
+
+class CPCA(nn.Module):
+    # Channel Prior Convolutional Attention
+    def __init__(self, c1, c2, reductionRatio=16):
+        super(CPCA, self).__init__()
+        # Shared MLP for Channel Attention
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        
+        mid_channels = max(c1 // reductionRatio, 1)
+        self.mlp = nn.Sequential(
+            nn.Conv2d(c1, mid_channels, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, c1, 1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+        
+        # Spatial Attention Branches
+        self.dwconv5x5 = nn.Conv2d(c1, c1, 5, padding=2, groups=c1, bias=False)
+        
+        self.dwconv1x7 = nn.Conv2d(c1, c1, (1,7), padding=(0,3), groups=c1, bias=False)
+        self.dwconv7x1 = nn.Conv2d(c1, c1, (7,1), padding=(3,0), groups=c1, bias=False)
+        
+        self.dwconv1x11 = nn.Conv2d(c1, c1, (1,11), padding=(0,5), groups=c1, bias=False)
+        self.dwconv11x1 = nn.Conv2d(c1, c1, (11,1), padding=(5,0), groups=c1, bias=False)
+        
+        self.dwconv1x21 = nn.Conv2d(c1, c1, (1,21), padding=(0,10), groups=c1, bias=False)
+        self.dwconv21x1 = nn.Conv2d(c1, c1, (21,1), padding=(10,0), groups=c1, bias=False)
+        
+        # Channel Mixing
+        self.channel_mixing = nn.Conv2d(c1, c2, 1, bias=False)
+        
+        self.cp_mixing = nn.Conv2d(c1, c2, 1, bias=False) if c1 != c2 else nn.Identity()
+
+    def forward(self, x):
+        # Channel Attention Map
+        avg_out = self.mlp(self.avg_pool(x))
+        max_out = self.mlp(self.max_pool(x))
+        ca_map = self.sigmoid(avg_out + max_out)
+        
+        # Channel Prior
+        cp = x * ca_map
+        
+        # Spatial Attention Branches
+        spatial_out = (cp + 
+                       self.dwconv5x5(cp) + 
+                       self.dwconv7x1(self.dwconv1x7(cp)) + 
+                       self.dwconv11x1(self.dwconv1x11(cp)) + 
+                       self.dwconv21x1(self.dwconv1x21(cp)))
+        
+        # Channel Mixing
+        cm_out = self.channel_mixing(spatial_out)
+        
+        # Element-wise product of Channel Mixing result and Channel Prior
+        # Project Channel Prior (c1) to c2 if necessary, then multiply
+        return cm_out * self.cp_mixing(cp)
